@@ -1,0 +1,16 @@
+{
+  "name": "curbside-backend",
+  "version": "1.0.0",
+  "description": "Stripe Connect backend for the Curbside marketplace app",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "stripe": "^16.2.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5"
+  }
+}
