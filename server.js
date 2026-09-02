@@ -1,11 +1,14 @@
+
+
 // Curbside backend — Stripe Connect marketplace server.
 //
 // What this does:
 //   1. Onboards sellers onto Stripe Connect (Express accounts) so money can be
 //      split between you (the platform) and them automatically.
 //   2. Charges a one-time $20 signup fee that goes straight to you.
-//   3. Charges buyers for sold items, sending $15 to you and the rest to the
-//      seller's own Stripe account — in a single payment, no manual transfers.
+//   3. Charges buyers for sold items: the seller keeps a flat $15, and you
+//      (the platform) keep everything above that — in a single payment, no
+//      manual transfers.
 //   4. Listens for Stripe webhooks to confirm payments actually completed
 //      before marking anything as paid.
 //
@@ -24,8 +27,9 @@ const Stripe = require('stripe');
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 const app = express();
 
-const SIGNUP_FEE_CENTS = Math.round(Number(process.env.SIGNUP_FEE_USD || 20) * 100);
-const SALE_FEE_CENTS = Math.round(Number(process.env.SALE_FEE_USD || 15) * 100);
+const SIGNUP_FEE_CENTS = Math.round(Number(process.env.SIGNUP_FEE_USD || 60) * 100);
+// The seller's flat, fixed payout per item sold. Everything above this goes to you.
+const SELLER_PAYOUT_CENTS = Math.round(Number(process.env.SELLER_PAYOUT_USD || 15) * 100);
 const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:4242';
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
 
@@ -122,7 +126,7 @@ app.post('/api/signup-fee/checkout', express.json(), async (req, res) => {
   }
 });
 
-// ---------- 3. Charge a buyer for a sold item ($15 to you, rest to seller) ----------
+// ---------- 3. Charge a buyer for a sold item (seller keeps a flat $15, you keep the rest) ----------
 app.post('/api/sale/checkout', express.json(), async (req, res) => {
   try {
     const { sellerId, listingId, title, priceUsd } = req.body;
@@ -133,9 +137,12 @@ app.post('/api/sale/checkout', express.json(), async (req, res) => {
     }
 
     const priceCents = Math.round(Number(priceUsd) * 100);
-    if (!priceCents || priceCents <= SALE_FEE_CENTS) {
-      return res.status(400).json({ error: 'Item price must be greater than the platform fee.' });
+    if (!priceCents || priceCents <= SELLER_PAYOUT_CENTS) {
+      return res.status(400).json({ error: `Item price must be greater than the seller's flat $${SELLER_PAYOUT_CENTS/100} payout.` });
     }
+
+    // The seller receives a flat $15; the platform (you) keeps everything above that.
+    const platformCutCents = priceCents - SELLER_PAYOUT_CENTS;
 
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
@@ -149,11 +156,11 @@ app.post('/api/sale/checkout', express.json(), async (req, res) => {
         quantity: 1,
       }],
       payment_intent_data: {
-        application_fee_amount: SALE_FEE_CENTS,
+        application_fee_amount: platformCutCents,
         transfer_data: { destination: record.stripeAccountId },
       },
-      metadata: { type: 'sale', sellerId, listingId },
-      success_url: `${FRONTEND_URL}?sale=success`,
+      metadata: { type: 'sale', sellerId, listingId, platformCutCents: String(platformCutCents) },
+      success_url: `${FRONTEND_URL}?sale=success&listingId=${encodeURIComponent(listingId || '')}`,
       cancel_url: `${FRONTEND_URL}?sale=cancelled`,
     });
     res.json({ url: session.url });
@@ -204,7 +211,8 @@ app.post('/webhook', express.raw({ type: 'application/json' }), (req, res) => {
 
     if (type === 'sale') {
       const ledger = getLedger();
-      ledger.events.push({ type: 'sale', amount: SALE_FEE_CENTS / 100, sellerId, listingId, at: Date.now() });
+      const platformCut = Number(session.metadata.platformCutCents || 0) / 100;
+      ledger.events.push({ type: 'sale', amount: platformCut, sellerId, listingId, at: Date.now() });
       saveLedger(ledger);
     }
   }
